@@ -1,5 +1,5 @@
 /*
- *  linux/arch/arm/mach-bcm2708/spi_config.c
+ *  linux/arch/arm/mach-meson8b/spi_config.c
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -16,9 +16,9 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
-#define DRV_NAME        "spi_config"
-#define DEFAULT_SPEED  500000
-#define MAX_DEVICES 16
+#define DRV_NAME	"spi_config"
+#define DEFAULT_SPEED	2000000
+#define MAX_DEVICES	4
 
 #include <linux/kernel.h>
 #include <linux/version.h>
@@ -34,34 +34,57 @@
 #include <linux/string.h>
 #include <linux/spi/spi.h>
 
+#include <linux/amlogic/aml_gpio_consumer.h>
+#include <asm/irq.h>
+
 /* the module parameters */
 static char* devices="";
 module_param(devices, charp, S_IRUGO);
 MODULE_PARM_DESC(devices, "SPI device configs");
+
+struct device_config {
+      struct spi_board_info	*brd;
+      u32			pd_len;
+      int			force_release;
+      int			irq_gpio;
+      int			irq_source;
+};
+
 /* the devices that we have registered */
 static struct spi_device *spi_devices[MAX_DEVICES];
 u16 spi_devices_bus[MAX_DEVICES];
 u16 spi_devices_cs[MAX_DEVICES];
-static int spi_devices_count=0;
+static int spi_devices_count = 0;
 
 static void register_device(char *devdesc);
 static void release_device(u16 bus, u16 cs,struct spi_device * dev);
 
 static int __init spi_config_init(void)
 {
-	char *head=devices;
-	char *idx=NULL;
+	char *head = devices;
 	/* clean up the spi_devices array */
-	memset(spi_devices,0,sizeof(spi_devices));
+	memset(spi_devices, 0, sizeof(spi_devices));
 	/* parse the devices parameter */
-	while(*head) {
+	while (*head) {
 		/* find delimiter and create a separator */
-		idx=strchr(head,',');if (idx) { *idx=0; }
+		char *idx = strchr(head, ',');
+		if (idx) { 
+			*idx = 0; 
+		}
+		
 		/* now parse the argument - if it is not "empty" */
-		if (*head) { register_device(head); }
+		if (*head) { 
+			register_device(head);
+		}
+		
 		/* and skip to next section and contine - exiting if there was no more ","*/
-		if (idx) { head=idx+1; } else { break;}
+		if (idx) { 
+			head = idx+1;
+		} else { 
+			break;
+		}
 	}
+	
 	/* and return OK */
         return 0;
 }
@@ -71,141 +94,152 @@ static void __exit spi_config_exit(void)
 {
 	int i;
 	/* unregister devices */
-	for(i=0;i<MAX_DEVICES;i++) {
+	for (i=0; i<MAX_DEVICES; i++) {
 		if (spi_devices[i]) {
-			release_device(spi_devices_bus[i],spi_devices_cs[i],spi_devices[i]);
-			spi_devices[i]=NULL;
+			release_device(spi_devices_bus[i], spi_devices_cs[i], spi_devices[i]);
+			spi_devices[i] = NULL;
 		}
 	}
+	
 	/* and return */
 	return;
 }
 module_exit(spi_config_exit);
 
-int spi_config_match_cs(struct device * dev, void *data) {
+static int spi_config_match_cs(struct device * dev, void *data) {
 	/* convert pointers to something we need */
 	struct spi_device *sdev=(struct spi_device *)dev;
 	u8 cs=(int)data;
 	/* convert to SPI device */
-	printk(KERN_INFO " spi_config_match_cs: SPI%i: check CS=%i to be %i\n",sdev->master->bus_num,sdev->chip_select,cs);
+	printk(KERN_INFO " spi_config_match_cs: SPI%i: check CS=%i to be %i\n", sdev->master->bus_num, sdev->chip_select, cs);
 
 	if (sdev->chip_select == cs) {
 		if (dev->driver) {
-			printk(KERN_INFO " spi_config_match_cs: SPI%i.%i: Found a device with modinfo %s\n",sdev->master->bus_num,sdev->chip_select,dev->driver->name);
+			printk(KERN_INFO " spi_config_match_cs: SPI%i.%i: Found a device with modinfo %s\n", sdev->master->bus_num, sdev->chip_select, dev->driver->name);
 		} else {
-			printk(KERN_INFO " spi_config_match_cs: SPI%i.%i: Found a device, but no driver...\n",sdev->master->bus_num,sdev->chip_select);
+			printk(KERN_INFO " spi_config_match_cs: SPI%i.%i: Found a device, but no driver...\n", sdev->master->bus_num, sdev->chip_select);
 		}
+		
 		return 1;
 	}
+	
 	/* by default return 0 - no match */
 	return 0;
 }
 
-static void register_device(char *devdesc) {
+static struct device_config* parse_device_config(char *devdesc)
+{
+	struct device_config* result;
 	char *tmp;
-	int i;
-	/* the board we configure */
-	struct spi_board_info *brd;
-	int brd_irq_gpio; /* an info that is not in the board */
-	u32 pd_len=0; /* the length of the platform data */
-	int force_release=0; /* flag for removing previous module - if not allocated by us...*/
-
-	/* the master to which we connect */
-	struct spi_master *master;
-	/* log the parameter */
-	printk(KERN_INFO "spi_config_register: device description: %s\n", devdesc);
-
-	/* allocate the board and fill with defaults */
-	brd=kmalloc(sizeof(struct spi_board_info),GFP_KERNEL);
-	memset(brd,0,sizeof(struct spi_board_info));
-        brd->bus_num=0xffff;
-        brd->chip_select=-1;
-	brd->max_speed_hz=DEFAULT_SPEED;
-        brd->mode=SPI_MODE_0;
-	brd->irq=-1;
-	brd_irq_gpio=-1;
-
+	
+	result = kmalloc(sizeof(struct device_config), GFP_KERNEL);
+	if (!result)
+	{
+		printk(KERN_ERR " spi_config_register: could not allocate %i bytes\n", sizeof(struct device_config));
+		return NULL;
+	}
+	
+	memset(result, 0, sizeof(struct device_config));
+	result->irq_gpio = -1;
+	result->irq_source = -1;
+	
+	result->brd = kmalloc(sizeof(struct spi_board_info), GFP_KERNEL);
+	if (!result->brd)
+	{
+		printk(KERN_ERR " spi_config_register: could not allocate %i bytes\n", sizeof(struct spi_board_info));
+		kfree(result);
+		return NULL;
+	}
+	
+	memset(result->brd, 0, sizeof(struct spi_board_info));
+	result->brd->irq=-1;
+	result->brd->max_speed_hz=DEFAULT_SPEED;
+        result->brd->bus_num = 0xffff;
+        result->brd->chip_select = 0xffff;
+        result->brd->mode=SPI_MODE_0;
+	
+#define HANDLE_SIMPLE_DATA(dataType, prefix, converter) \
+	if (strncmp(key, prefix, strlen(prefix))==0) { \
+		u32 offset; \
+		dataType v; \
+		if (kstrtou32(key + strlen(prefix), 0, &offset)) { \
+			printk(KERN_ERR " spi_config_register: the " prefix " position can not get parsed in %s - ignoring config\n", key + strlen(prefix)); \
+			goto parse_device_config_error; \
+		} \
+		if (offset + sizeof(dataType) > result->pd_len) { \
+			printk(KERN_ERR " spi_config_register: the " prefix " position %02x is larger than the length of the structure (%02x) - ignoring config\n", offset, result->pd_len); \
+			goto parse_device_config_error; \
+		} \
+		if (converter(value, 0, &v)) { \
+			printk(KERN_ERR " spi_config_register: the " prefix " value can not get parsed in %s - ignoring config\n", value); \
+			goto parse_device_config_error; \
+		} \
+		*((dataType*)(result->brd->platform_data + offset)) = v; \
+	}
+#define HANDLE_DATA(expectedKey, converter, destination) \
+	if (strcmp(key, expectedKey) == 0) { \
+		if (converter(value, 10, &destination)) { \
+			printk(KERN_ERR " spi_config_register: %s=%s can not get parsed - ignoring config\n", key, value); \
+			goto parse_device_config_error; \
+		} \
+	} 
+	
 	/* now parse the device description */
-	while((tmp=strsep(&devdesc,":"))) {
-		char* key,*value;
-		value=tmp;
-		key=strsep(&value,"=");
+	while ((tmp = strsep(&devdesc, ":"))) {
+		char *value=tmp;
+		char *key = strsep(&value, "=");
+		
 		if (!value) {
 			/* some keyonly fields */
 			if (strcmp(key,"force_release")==0) {
-				force_release=1;
-				continue;
+				result->force_release = 1;
 			} else {
-				printk(KERN_ERR " spi_config_register: incomplete argument: %s - no value\n",key);
-				goto register_device_err;
+				printk(KERN_ERR " spi_config_register: incomplete argument: %s - no value\n", key);
+				goto parse_device_config_error;
 			}
 		}
-		if (strcmp(key,"bus")==0) {
-			if (kstrtos16(value,10,&brd->bus_num)) {
-				printk(KERN_ERR " spi_config_register: %s=%s can not get parsed - ignoring config\n",key,value);
-				goto register_device_err;
-			}
-		} else if (strcmp(key,"cs")==0) {
-			if (kstrtou16(value,10,&brd->chip_select)) {
-				printk(KERN_ERR " spi_config_register: %s=%s can not get parsed - ignoring config\n",key,value);
-				goto register_device_err;
-			}
-		} else if (strcmp(key,"speed")==0) {
-			if (kstrtoint(value,10,&brd->max_speed_hz)) {
-				printk(KERN_ERR " spi_config_register: %s=%s can not get parsed - ignoring config\n",key,value);
-				goto register_device_err;
-			}
-		} else if (strcmp(key,"gpioirq")==0) {
-			if (kstrtoint(value,10,&brd_irq_gpio)) {
-				printk(KERN_ERR " spi_config_register: %s=%s can not get parsed - ignoring config\n",key,value);
-				goto register_device_err;
-			}
-			brd->irq=gpio_to_irq(brd_irq_gpio);
-		} else if (strcmp(key,"irq")==0) {
-			if (kstrtoint(value,10,&brd->irq)) {
-				printk(KERN_ERR " spi_config_register: %s=%s can not get parsed - ignoring config\n",key,value);
-				goto register_device_err;
-			}
-		} else if (strcmp(key,"mode")==0) {
-			if (kstrtou16(value,10,&brd->mode)) {
-				printk(KERN_ERR " spi_config_register: %s=%s can not get parsed - ignoring config\n",key,value);
-				goto register_device_err;
-			}
-		} else if (strcmp(key,"modalias")==0) {
-			strncpy(brd->modalias,value,sizeof(brd->modalias));
-		} else if (strcmp(key,"pd")==0) {
+		
+		else if (strcmp(key, "modalias") == 0) {
+			strncpy(result->brd->modalias, value, sizeof(result->brd->modalias));
+		} else HANDLE_DATA("irq", kstrtoint, result->brd->irq)
+		else HANDLE_DATA("speed", kstrtou32, result->brd->max_speed_hz)
+		else HANDLE_DATA("bus", kstrtou16, result->brd->bus_num)
+		else HANDLE_DATA("cs", kstrtou16, result->brd->chip_select)
+		else HANDLE_DATA("mode", kstrtou8, result->brd->mode)
+		else HANDLE_DATA("irqgpio", kstrtoint, result->irq_gpio)
+		else HANDLE_DATA("irqsource", kstrtoint, result->irq_source)
+		else if (strcmp(key, "pd") == 0) {
 			/* we may only allocate once */
-			if (pd_len) {
+			if (result->pd_len) {
 				printk(KERN_ERR " spi_config_register: the pd has already been configured - ignoring config\n");
-				goto register_device_err;
+				goto parse_device_config_error;
 			}
 			/* get the length of platform data */
-			if (kstrtou32(value,0,&pd_len)) {
-				printk(KERN_ERR " spi_config_register: the pd length can not get parsed in %s - ignoring config\n",value);
-				goto register_device_err;
+			if (kstrtou32(value, 0, &result->pd_len)) {
+				printk(KERN_ERR " spi_config_register: the pd length can not get parsed in %s - ignoring config\n", value);
+				goto parse_device_config_error;
 			}
 			/* now we allocate it - maybe we should allocate a minimum size to avoid abuse? */
-			brd->platform_data=kmalloc(pd_len,GFP_KERNEL);
-			if (brd->platform_data) {
-				memset((char*)brd->platform_data,0,pd_len);
+			result->brd->platform_data=kmalloc(result->pd_len, GFP_KERNEL);
+			if (result->brd->platform_data) {
+				memset((char*)result->brd->platform_data, 0, result->pd_len);
 			} else {
-				printk(KERN_ERR " spi_config_register: could not allocate %i bytes for platform memory\n",pd_len);
-				goto register_device_err;
+				printk(KERN_ERR " spi_config_register: could not allocate %i bytes for platform memory\n", result->pd_len);
+				goto parse_device_config_error;
 			}
 		} else if (strncmp(key,"pdx-",4)==0) {
 			u32 offset;
 			char *src=value;
-			/* store an integer in pd */
-			if (kstrtou32(key+4,0,&offset)) {
-				printk(KERN_ERR " spi_config_register: the pdx position can not get parsed in %s - ignoring config\n",key+4);
-				goto register_device_err;
+			if (kstrtou32(key+4, 0, &offset)) {
+				printk(KERN_ERR " spi_config_register: the pdx position can not get parsed in %s - ignoring config\n", key+4);
+				goto parse_device_config_error;
 			}
-			if (offset>=pd_len) {
-				printk(KERN_ERR " spi_config_register: the pdx offset %i is outside of allocated length %i- ignoring config\n",offset,pd_len);
-				goto register_device_err;
+			if (offset >= result->pd_len) {
+				printk(KERN_ERR " spi_config_register: the pdx offset %i is outside of allocated length %i- ignoring config\n", offset, result->pd_len);
+				goto parse_device_config_error;
 			}
 			/* and now we fill it in with the data */
-			while (offset<pd_len) {
+			while (offset < result->pd_len) {
 				char hex[3];
 				char v;
 				hex[0]=*(src++);
@@ -214,251 +248,191 @@ static void register_device(char *devdesc) {
 				if (!hex[1]) {
 					printk(KERN_ERR " spi_config_register: the pdx hex-data is not of expected length in %s (hex number needs to be chars)- ignoring config\n",
 						value);
-					goto register_device_err;
+					goto parse_device_config_error;
 				}
 				hex[2]=0; /* zero terminate it */
 				if (kstrtou8(hex,16,&v)) {
 					printk(KERN_ERR " spi_config_register: the pdx data could not get parsed for %s in %s - ignoring config\n",
 						hex,value);
 				} else {
-					*((char*)(brd->platform_data+offset))=v;
+					*((char*)(result->brd->platform_data+offset))=v;
 					offset++;
 				}
 			}
 			/* check overflow */
 			if (*src) {
 				printk(KERN_ERR " spi_config_register: the pdx data exceeds allocated length - rest of data is: %s - ignoring config\n",src);
-				goto register_device_err;
+				goto parse_device_config_error;
 			}
-		} else if (strncmp(key,"pds64-",6)==0) {
-			u32 offset;
-			s64 v;
-			/* store an integer in pd */
-			if (kstrtou32(key+6,0,&offset)) {
-				printk(KERN_ERR " spi_config_register: the pds64 position can not get parsed in %s - ignoring config\n",key+6);
-				goto register_device_err;
-			}
-			if(offset+7>=pd_len) {
-				printk(KERN_ERR " spi_config_register: the pds64 position %02x is larger than the length of the structure (%02x) - ignoring config\n",offset,pd_len);
-				goto register_device_err;
-			}
-			/* now read the value */
-			if (kstrtos64(value,0,&v)) {
-				printk(KERN_ERR " spi_config_register: the pds64 value can not get parsed in %s - ignoring config\n",value);
-				goto register_device_err;
-			}
-			*((s64*)(brd->platform_data+offset))=v;
-		} else if (strncmp(key,"pdu64-",6)==0) {
-			u32 offset;
-			u64 v;
-			/* store an integer in pd */
-			if (kstrtou32(key+6,0,&offset)) {
-				printk(KERN_ERR " spi_config_register: the pdu64 position can not get parsed in %s - ignoring config\n",key+6);
-				goto register_device_err;
-			}
-			if(offset+7>=pd_len) {
-				printk(KERN_ERR " spi_config_register: the pdu64 position %02x is larger than the length of the structure (%02x) - ignoring config\n",offset,pd_len);
-				goto register_device_err;
-			}
-			/* now read the value */
-			if (kstrtou64(value,0,&v)) {
-				printk(KERN_ERR " spi_config_register: the pds64 value can not get parsed in %s - ignoring config\n",value);
-				goto register_device_err;
-			}
-			*((u64*)(brd->platform_data+offset))=v;
-		} else if (strncmp(key,"pds32-",6)==0) {
-			u32 offset;
-			s32 v;
-			/* store an integer in pd */
-			if (kstrtou32(key+6,0,&offset)) {
-				printk(KERN_ERR " spi_config_register: the pds32 position can not get parsed in %s - ignoring config\n",key+6);
-				goto register_device_err;
-			}
-			if(offset+3>=pd_len) {
-				printk(KERN_ERR " spi_config_register: the pds32 position %02x is larger than the length of the structure (%02x) - ignoring config\n",offset,pd_len);
-				goto register_device_err;
-			}
-			/* now read the value */
-			if (kstrtos32(value,0,&v)) {
-				printk(KERN_ERR " spi_config_register: the pds32 value can not get parsed in %s - ignoring config\n",value);
-				goto register_device_err;
-			}
-			*((s32*)(brd->platform_data+offset))=v;
-		} else if (strncmp(key,"pdu32-",6)==0) {
-			u32 offset;
-			u32 v;
-			/* store an integer in pd */
-			if (kstrtou32(key+6,0,&offset)) {
-				printk(KERN_ERR " spi_config_register: the pdu32 position can not get parsed in %s - ignoring config\n",key+6);
-				goto register_device_err;
-			}
-			if(offset+3>=pd_len) {
-				printk(KERN_ERR " spi_config_register: the pdu32 position %02x is larger than the length of the structure (%02x) - ignoring config\n",offset,pd_len);
-				goto register_device_err;
-			}
-			/* now read the value */
-			if (kstrtou32(value,0,&v)) {
-				printk(KERN_ERR " spi_config_register: the pds32 value can not get parsed in %s - ignoring config\n",value);
-				goto register_device_err;
-			}
-			*((u32*)(brd->platform_data+offset))=v;
-		} else if (strncmp(key,"pdu16-",6)==0) {
-			u32 offset;
-			u16 v;
-			/* store an integer in pd */
-			if (kstrtou32(key+6,0,&offset)) {
-				printk(KERN_ERR " spi_config_register: the pdu16 position can not get parsed in %s - ignoring config\n",key+6);
-				goto register_device_err;
-			}
-			if(offset+1>=pd_len) {
-				printk(KERN_ERR " spi_config_register: the pdu16 position %02x is larger than the length of the structure (%02x) - ignoring config\n",offset,pd_len);
-				goto register_device_err;
-			}
-			/* now read the value */
-			if (kstrtou16(value,0,&v)) {
-				printk(KERN_ERR " spi_config_register: the pdu16 value can not get parsed in %s - ignoring config\n",value);
-				goto register_device_err;
-			}
-			*((u16*)(brd->platform_data+offset))=v;
-		} else if (strncmp(key,"pds16-",6)==0) {
-			u32 offset;
-			s16 v;
-			/* store an integer in pd */
-			if (kstrtou32(key+6,0,&offset)) {
-				printk(KERN_ERR " spi_config_register: the pdu16 position can not get parsed in %s - ignoring config\n",key+6);
-				goto register_device_err;
-			}
-			if(offset+1>=pd_len) {
-				printk(KERN_ERR " spi_config_register: the pdu16 position %02x is larger than the length of the structure (%02x) - ignoring config\n",offset,pd_len);
-				goto register_device_err;
-			}
-			/* now read the value */
-			if (kstrtos16(value,0,&v)) {
-				printk(KERN_ERR " spi_config_register: the pdu16 value can not get parsed in %s - ignoring config\n",value);
-				goto register_device_err;
-			}
-			*((s16*)(brd->platform_data+offset))=v;
-		} else if (strncmp(key,"pdu8-",5)==0) {
-			u32 offset;
-			u8 v;
-			/* store an integer in pd */
-			if (kstrtou32(key+5,0,&offset)) {
-				printk(KERN_ERR " spi_config_register: the pdu8 position can not get parsed in %s - ignoring config\n",key+5);
-				goto register_device_err;
-			}
-			if(offset>=pd_len) {
-				printk(KERN_ERR " spi_config_register: the pdu8 position %02x is larger than the length of the structure (%02x) - ignoring config\n",offset,pd_len);
-				goto register_device_err;
-			}
-			/* now read the value */
-			if (kstrtou8(value,0,&v)) {
-				printk(KERN_ERR " spi_config_register: the pdu8 value can not get parsed in %s - ignoring config\n",value);
-				goto register_device_err;
-			}
-			*((u8*)(brd->platform_data+offset))=v;
 		} else if (strncmp(key,"pdp-",4)==0) {
 			u32 offset;
 			u32 v;
-			/* store an integer in pd */
-			if (kstrtou32(key+4,0,&offset)) {
-				printk(KERN_ERR " spi_config_register: the pdp position can not get parsed in %s - ignoring config\n",key+5);
-				goto register_device_err;
+			if (kstrtou32(key+4, 0, &offset)) {
+				printk(KERN_ERR " spi_config_register: the pdp position can not get parsed in %s - ignoring config\n", key+4);
+				goto parse_device_config_error;
 			}
-			if(offset+sizeof(void*)>=pd_len) {
-				printk(KERN_ERR " spi_config_register: the pdp position %02x is larger than the length of the structure (%02x) - ignoring config\n",offset,pd_len);
-				goto register_device_err;
+			if(offset+sizeof(void*)>=result->pd_len) {
+				printk(KERN_ERR " spi_config_register: the pdp position %02x is larger than the length of the structure (%02x) - ignoring config\n", offset, result->pd_len);
+				goto parse_device_config_error;
 			}
 			/* now read the value */
-			if (kstrtou32(value,0,&v)) {
-				printk(KERN_ERR " spi_config_register: the pdp value can not get parsed in %s - ignoring config\n",value);
-				goto register_device_err;
+			if (kstrtou32(value, 0, &v)) {
+				printk(KERN_ERR " spi_config_register: the pdp value can not get parsed in %s - ignoring config\n", value);
+				goto parse_device_config_error;
 			}
 			/* and do some sanity checks */
-			if (v>=pd_len) {
+			if (v >= result->pd_len) {
 				printk(KERN_ERR " spi_config_register: the pdp value points outside of platform data - ignoring config\n");
-				goto register_device_err;
+				goto parse_device_config_error;
 			}
 			/* maybe we also should check that there is at least sizeof(void*) bytes left to point to...*/
-			*((char**)(brd->platform_data+offset))=(char*)(brd->platform_data)+v;
-		} else {
+			*((char**)(result->brd->platform_data+offset))=(char*)(result->brd->platform_data) + v;
+		} 
+		else HANDLE_SIMPLE_DATA(s64, "pds64-", kstrtos64)
+		else HANDLE_SIMPLE_DATA(u64, "pdu64-", kstrtou64)
+		else HANDLE_SIMPLE_DATA(s32, "pds32-", kstrtos32)
+		else HANDLE_SIMPLE_DATA(u32, "pdu32-", kstrtou32)
+		else HANDLE_SIMPLE_DATA(s16, "pds16-", kstrtos16)
+		else HANDLE_SIMPLE_DATA(u16, "pdu16-", kstrtou16)
+		else HANDLE_SIMPLE_DATA(s8, "pds8-", kstrtos8)
+		else HANDLE_SIMPLE_DATA(u8, "pdu8-", kstrtou8)
+		else {
 			printk(KERN_ERR " spi_config_register: unsupported argument %s - ignoring config\n",key);
-			goto register_device_err;
+			goto parse_device_config_error;
 		}
 	}
+	
+	return result;
+	
+parse_device_config_error:
+	if (result->brd->platform_data) kfree(result->brd->platform_data);
+	kfree(result->brd);
+	kfree(result);
+	return NULL;
+}
+
+static void register_device(char *devdesc) {
+	struct device_config *config;
+	struct spi_master *master;
+	int i;
+	
+	/* log the parameter */
+	printk(KERN_INFO "spi_config_register: device description: %s\n", devdesc);
+
+	config = parse_device_config(devdesc);
+	if (!config)
+	{
+		goto register_device_err;
+	}
+
 	/* now check if things are set correctly */
 	/* first the bus */
-	if (brd->bus_num==0xffff) {
+	if (config->brd->bus_num == 0xffff) {
 		printk(KERN_ERR " spi_config_register: bus not set - ignoring config \n");
 		goto register_device_err;
 	}
+	
 	/* getting the master info */
-	master=spi_busnum_to_master(brd->bus_num);
+	master = spi_busnum_to_master(config->brd->bus_num);
 	if (!master) {
-		printk(KERN_ERR " spi_config_register: no spi%i bus found - ignoring config\n",brd->bus_num);
+		printk(KERN_ERR " spi_config_register: no spi%i bus found - ignoring config\n", config->brd->bus_num);
 		goto register_device_err;
 	}
+	
 	/* now the chip_select */
-	if (brd->chip_select<0) {
-		printk(KERN_ERR " spi_config_register:spi%i: cs not set - ignoring config\n",brd->bus_num);
+	if (config->brd->chip_select == 0xffff) {
+		printk(KERN_ERR " spi_config_register:spi%i: cs not set - ignoring config\n", config->brd->bus_num);
 		goto register_device_err;
 	}
-	if (brd->chip_select>master->num_chipselect) {
+	
+	if (config->brd->chip_select > master->num_chipselect) {
 		printk(KERN_ERR " spi_config_register:spi%i: cs=%i not possible for this bus - max_cs= %i - ignoring config\n",
-			brd->bus_num,brd->chip_select,master->num_chipselect);
+			config->brd->bus_num, config->brd->chip_select, master->num_chipselect);
 		goto register_device_err;
 	}
+	
 	/* check if we are not in the list of registered devices already */
-	for(i=0;i<spi_devices_count;i++) {
-		if (
-			(spi_devices[i])
-			&& (brd->bus_num==spi_devices[i]->master->bus_num)
-			&& (brd->chip_select==spi_devices[i]->chip_select)
-			) {
-			printk(KERN_ERR " spi_config_register:spi%i.%i: allready assigned - ignoring config\n",
-				brd->bus_num,brd->chip_select);
-			return;
+	for(i = 0; i < spi_devices_count; i++) {
+		if ((spi_devices[i]) && (config->brd->bus_num == spi_devices[i]->master->bus_num) && (config->brd->chip_select == spi_devices[i]->chip_select)) {
+			printk(KERN_ERR " spi_config_register:spi%i.%i: allready assigned - ignoring config\n", config->brd->bus_num, config->brd->chip_select);
+			goto register_device_err;
 		}
 	}
+	
 	/* check if a device exists already for the requested cs - but is not allocated by us...*/
 	if (master) {
-		struct device *found=device_find_child(&master->dev,(void*)(int)brd->chip_select,spi_config_match_cs);
+		struct device *found = device_find_child(&master->dev, (void*)(int)config->brd->chip_select, spi_config_match_cs);
 		if (found) {
-			printk(KERN_ERR "spi_config_register:spi%i.%i:%s: found already registered device\n", brd->bus_num,brd->chip_select,brd->modalias);
-			if (force_release) {
+			printk(KERN_ERR "spi_config_register:spi%i.%i:%s: found already registered device\n", config->brd->bus_num, config->brd->chip_select, config->brd->modalias);
+			if (config->force_release) {
 				/* write the message */
-				printk(KERN_ERR " spi_config_register:spi%i.%i:%s: forcefully-releasing already registered device taints kernel\n", brd->bus_num,brd->chip_select,brd->modalias);
+				printk(KERN_ERR " spi_config_register:spi%i.%i:%s: forcefully-releasing already registered device taints kernel\n", 
+					config->brd->bus_num, config->brd->chip_select, config->brd->modalias);
 				/* let us taint the kernel */
-#if LINUX_VERSION_CODE <= KERNEL_VERSION(3,9,0)
-				add_taint(TAINT_FORCED_MODULE);
-#else
-				add_taint(TAINT_FORCED_MODULE,LOCKDEP_STILL_OK);
-#endif
+				add_taint(TAINT_FORCED_MODULE, LOCKDEP_STILL_OK);
 				/* the below leaves some unallocated memory wasting kernel memory !!! */
 				spi_unregister_device((struct spi_device*)found);
 				put_device(found);
 			} else {
-				printk(KERN_ERR " spi_config_register:spi%i.%i:%s: if you are sure you may add force_release to the arguments\n", brd->bus_num,brd->chip_select,brd->modalias);
+				printk(KERN_ERR " spi_config_register:spi%i.%i:%s: if you are sure you may add force_release to the arguments\n", 
+					config->brd->bus_num, config->brd->chip_select, config->brd->modalias);
 				/* release device - needed from device_find_child */
 				put_device(found);
 				goto register_device_err;
 			}
 		}
 	}
+	
 	/* now check modalias */
-	if (!brd->modalias[0]) {
+	if (!config->brd->modalias[0]) {
 		printk(KERN_ERR " spi_config_register:spi%i.%i: modalias not set - ignoring config\n",
-			brd->bus_num,brd->chip_select);
+			config->brd->bus_num, config->brd->chip_select);
 		goto register_device_err;
 	}
+	
 	/* check speed is "reasonable" */
-	if (brd->max_speed_hz<2048) {
-		printk(KERN_ERR " spi_config_register:spi%i.%i:%s: speed is set too low at %i\n",
-			brd->bus_num,brd->chip_select,brd->modalias,brd->max_speed_hz);
+	if (config->brd->max_speed_hz < 8192) {
+		printk(KERN_ERR " spi_config_register:spi%i.%i:%s: speed is set too low at %i - ignoring config\n",
+			config->brd->bus_num, config->brd->chip_select, config->brd->modalias, config->brd->max_speed_hz);
 		goto register_device_err;
 	}
 
+	if (config->irq_gpio >= 0 || config->irq_source >= 0) {
+		if (config->brd->irq >= 0) {
+			printk(KERN_ERR " spi_config_register:spi%i.%i:%s: irq is set so irq_source and irq_gpio must be unset - ignoring config\n",
+				config->brd->bus_num, config->brd->chip_select, config->brd->modalias);
+			goto register_device_err;
+		}
+		
+		if (config->irq_gpio < 0) {
+			printk(KERN_ERR " spi_config_register:spi%i.%i:%s: irq_source is set but irq_gpio is unset - ignoring config\n",
+				config->brd->bus_num, config->brd->chip_select, config->brd->modalias);
+			goto register_device_err;
+		}
+		
+		if (config->irq_source < 0) {
+			printk(KERN_ERR " spi_config_register:spi%i.%i:%s: irq_gpio is set but irq_source is unset - ignoring config\n",
+				config->brd->bus_num, config->brd->chip_select, config->brd->modalias);
+			goto register_device_err;
+		}
+		
+		if (amlogic_gpio_request_one(config->irq_gpio, GPIOF_IN, config->brd->modalias)) {
+			printk(KERN_ERR " spi_config_register:spi%i.%i:%s: amlogic_gpio_request_one fail - ignoring config\n",
+				config->brd->bus_num, config->brd->chip_select, config->brd->modalias);
+			goto register_device_err;
+		}
+		
+                // trigger = GPIO_IRQ_HIGH = 0, GPIO_IRQ_LOW = 1, GPIO_IRQ_RISING = 2, GPIO_IRQ_FALLING = 3
+		config->brd->irq = INT_GPIO_0 + config->irq_source;
+		if (amlogic_gpio_to_irq(config->irq_gpio, config->brd->modalias, AML_GPIO_IRQ(config->irq_source, FILTER_NUM1, 1))) {
+			printk(KERN_ERR " spi_config_register:spi%i.%i:%s: amlogic_gpio_to_irq fail - ignoring config\n",
+				config->brd->bus_num, config->brd->chip_select, config->brd->modalias);
+			goto register_device_err;
+		}
+	}
+	
 	/* register the device */
-	if ((spi_devices[spi_devices_count]=spi_new_device(master,brd))) {
+	if ((spi_devices[spi_devices_count]=spi_new_device(master, config->brd))) {
 		spi_devices_bus[i]=spi_devices[spi_devices_count]->master->bus_num;
 		spi_devices_cs[i]=spi_devices[spi_devices_count]->chip_select;
 
@@ -478,7 +452,7 @@ static void register_device(char *devdesc) {
 				spi_devices[spi_devices_count]->modalias,
 				spi_devices[spi_devices_count]->max_speed_hz,
 				spi_devices[spi_devices_count]->mode,
-				brd_irq_gpio,
+				config->irq_gpio,
 				spi_devices[spi_devices_count]->irq
 				);
 		}
@@ -490,21 +464,24 @@ static void register_device(char *devdesc) {
 				);
 			print_hex_dump(KERN_INFO,prefix,DUMP_PREFIX_ADDRESS,
 				16,1,
-				spi_devices[spi_devices_count]->dev.platform_data,pd_len,true
+				spi_devices[spi_devices_count]->dev.platform_data,config->pd_len,true
 				);
 		}
 		spi_devices_count++;
 	} else {
-		printk(KERN_ERR "spi_config_register:spi%i.%i:%s: failed to register device\n", brd->bus_num,brd->chip_select,brd->modalias);
+		printk(KERN_ERR "spi_config_register:spi%i.%i:%s: failed to register device\n", config->brd->bus_num,config->brd->chip_select,config->brd->modalias);
 		goto register_device_err;
 	}
 
+	kfree(config);
 	/* and return successfull */
 	return;
+	
 	/* error handling code */
 register_device_err:
-	if (brd->platform_data) { kfree(brd->platform_data); }
-	kfree(brd);
+	if (config->brd->platform_data) { kfree(config->brd->platform_data); }
+	kfree(config->brd);
+	kfree(config);
 	return;
 }
 
