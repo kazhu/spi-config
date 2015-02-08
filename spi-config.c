@@ -46,7 +46,7 @@ struct device_config {
       struct spi_board_info	*brd;
       u32			pd_len;
       int			force_release;
-      int			irq_gpio;
+      char			irq_gpioname[20];
       int			irq_source;
 };
 
@@ -79,7 +79,7 @@ static int __init spi_config_init(void)
 		
 		/* and skip to next section and contine - exiting if there was no more ","*/
 		if (idx) { 
-			head = idx+1;
+			head = idx + 1;
 		} else { 
 			break;
 		}
@@ -140,7 +140,6 @@ static struct device_config* parse_device_config(char *devdesc)
 	}
 	
 	memset(result, 0, sizeof(struct device_config));
-	result->irq_gpio = -1;
 	result->irq_source = -1;
 	
 	result->brd = kmalloc(sizeof(struct spi_board_info), GFP_KERNEL);
@@ -152,61 +151,63 @@ static struct device_config* parse_device_config(char *devdesc)
 	}
 	
 	memset(result->brd, 0, sizeof(struct spi_board_info));
-	result->brd->irq=-1;
-	result->brd->max_speed_hz=DEFAULT_SPEED;
+	result->brd->irq = -1;
+	result->brd->max_speed_hz = DEFAULT_SPEED;
         result->brd->bus_num = 0xffff;
         result->brd->chip_select = 0xffff;
-        result->brd->mode=SPI_MODE_0;
+        result->brd->mode = SPI_MODE_0;
 	
-#define HANDLE_SIMPLE_DATA(dataType, prefix, converter) \
-	if (strncmp(key, prefix, strlen(prefix))==0) { \
-		u32 offset; \
-		dataType v; \
-		if (kstrtou32(key + strlen(prefix), 0, &offset)) { \
-			printk(KERN_ERR " spi_config_register: the " prefix " position can not get parsed in %s - ignoring config\n", key + strlen(prefix)); \
-			goto parse_device_config_error; \
-		} \
-		if (offset + sizeof(dataType) > result->pd_len) { \
-			printk(KERN_ERR " spi_config_register: the " prefix " position %02x is larger than the length of the structure (%02x) - ignoring config\n", offset, result->pd_len); \
-			goto parse_device_config_error; \
-		} \
-		if (converter(value, 0, &v)) { \
-			printk(KERN_ERR " spi_config_register: the " prefix " value can not get parsed in %s - ignoring config\n", value); \
-			goto parse_device_config_error; \
-		} \
-		*((dataType*)(result->brd->platform_data + offset)) = v; \
+#define HANDLE_SIMPLE_DATA(dataType, prefix, converter)\
+	if (strncmp(key, prefix, strlen(prefix))==0) {\
+		u32 offset;\
+		dataType v;\
+		if (kstrtou32(key + strlen(prefix), 0, &offset)) {\
+			printk(KERN_ERR " spi_config_register: the " prefix " position can not get parsed in %s - ignoring config\n", key + strlen(prefix));\
+			goto parse_device_config_error;\
+		}\
+		if (offset + sizeof(dataType) > result->pd_len) {\
+			printk(KERN_ERR " spi_config_register: the " prefix " position %02x is larger than the length of the structure (%02x) - ignoring config\n", offset, result->pd_len);\
+			goto parse_device_config_error;\
+		}\
+		if (converter(value, 0, &v)) {\
+			printk(KERN_ERR " spi_config_register: the " prefix " value can not get parsed in %s - ignoring config\n", value);\
+			goto parse_device_config_error;\
+		}\
+		*((dataType*)(result->brd->platform_data + offset)) = v;\
 	}
-#define HANDLE_DATA(expectedKey, converter, destination) \
-	if (strcmp(key, expectedKey) == 0) { \
-		if (converter(value, 10, &destination)) { \
-			printk(KERN_ERR " spi_config_register: %s=%s can not get parsed - ignoring config\n", key, value); \
-			goto parse_device_config_error; \
-		} \
-	} 
+#define HANDLE_DATA(expectedKey, converter, destination)\
+	if (strcmp(key, expectedKey) == 0) {\
+		if (converter(value, 10, &destination)) {\
+			printk(KERN_ERR " spi_config_register: %s=%s can not get parsed - ignoring config\n", key, value);\
+			goto parse_device_config_error;\
+		}\
+	}
 	
 	/* now parse the device description */
 	while ((tmp = strsep(&devdesc, ":"))) {
-		char *value=tmp;
+		char *value = tmp;
 		char *key = strsep(&value, "=");
 		
 		if (!value) {
 			/* some keyonly fields */
-			if (strcmp(key,"force_release")==0) {
+			if (strcmp(key, "force_release") == 0) {
 				result->force_release = 1;
 			} else {
 				printk(KERN_ERR " spi_config_register: incomplete argument: %s - no value\n", key);
 				goto parse_device_config_error;
 			}
 		}
-		
 		else if (strcmp(key, "modalias") == 0) {
 			strncpy(result->brd->modalias, value, sizeof(result->brd->modalias));
-		} else HANDLE_DATA("irq", kstrtoint, result->brd->irq)
+		} 
+		else HANDLE_DATA("irq", kstrtoint, result->brd->irq)
 		else HANDLE_DATA("speed", kstrtou32, result->brd->max_speed_hz)
 		else HANDLE_DATA("bus", kstrtou16, result->brd->bus_num)
 		else HANDLE_DATA("cs", kstrtou16, result->brd->chip_select)
 		else HANDLE_DATA("mode", kstrtou8, result->brd->mode)
-		else HANDLE_DATA("irqgpio", kstrtoint, result->irq_gpio)
+		else if (strcmp(key, "irqgpio") == 0) {
+			strncpy(result->irq_gpioname, value, sizeof(result->irq_gpioname));
+		} 
 		else HANDLE_DATA("irqsource", kstrtoint, result->irq_source)
 		else if (strcmp(key, "pd") == 0) {
 			/* we may only allocate once */
@@ -220,18 +221,19 @@ static struct device_config* parse_device_config(char *devdesc)
 				goto parse_device_config_error;
 			}
 			/* now we allocate it - maybe we should allocate a minimum size to avoid abuse? */
-			result->brd->platform_data=kmalloc(result->pd_len, GFP_KERNEL);
+			result->brd->platform_data = kmalloc(result->pd_len, GFP_KERNEL);
 			if (result->brd->platform_data) {
 				memset((char*)result->brd->platform_data, 0, result->pd_len);
 			} else {
 				printk(KERN_ERR " spi_config_register: could not allocate %i bytes for platform memory\n", result->pd_len);
 				goto parse_device_config_error;
 			}
-		} else if (strncmp(key,"pdx-",4)==0) {
+		} 
+		else if (strncmp(key,"pdx-", 4) == 0) {
 			u32 offset;
-			char *src=value;
-			if (kstrtou32(key+4, 0, &offset)) {
-				printk(KERN_ERR " spi_config_register: the pdx position can not get parsed in %s - ignoring config\n", key+4);
+			char *src = value;
+			if (kstrtou32(key + 4, 0, &offset)) {
+				printk(KERN_ERR " spi_config_register: the pdx position can not get parsed in %s - ignoring config\n", key + 4);
 				goto parse_device_config_error;
 			}
 			if (offset >= result->pd_len) {
@@ -242,36 +244,36 @@ static struct device_config* parse_device_config(char *devdesc)
 			while (offset < result->pd_len) {
 				char hex[3];
 				char v;
-				hex[0]=*(src++);
-				if (!hex[0]) { break; }
-				hex[1]=*(src++);
-				if (!hex[1]) {
+				hex[0] = *(src++);
+				if (hex[0] == '\0') { break; }
+				hex[1] = *(src++);
+				if (hex[1] == '\0') {
 					printk(KERN_ERR " spi_config_register: the pdx hex-data is not of expected length in %s (hex number needs to be chars)- ignoring config\n",
 						value);
 					goto parse_device_config_error;
 				}
-				hex[2]=0; /* zero terminate it */
-				if (kstrtou8(hex,16,&v)) {
+				hex[2] = 0; /* zero terminate it */
+				if (kstrtou8(hex, 16, &v)) {
 					printk(KERN_ERR " spi_config_register: the pdx data could not get parsed for %s in %s - ignoring config\n",
-						hex,value);
+						hex, value);
 				} else {
-					*((char*)(result->brd->platform_data+offset))=v;
+					*((char*)(result->brd->platform_data + offset)) = v;
 					offset++;
 				}
 			}
 			/* check overflow */
 			if (*src) {
-				printk(KERN_ERR " spi_config_register: the pdx data exceeds allocated length - rest of data is: %s - ignoring config\n",src);
+				printk(KERN_ERR " spi_config_register: the pdx data exceeds allocated length - rest of data is: %s - ignoring config\n", src);
 				goto parse_device_config_error;
 			}
-		} else if (strncmp(key,"pdp-",4)==0) {
+		} else if (strncmp(key, "pdp-", 4) == 0) {
 			u32 offset;
 			u32 v;
-			if (kstrtou32(key+4, 0, &offset)) {
-				printk(KERN_ERR " spi_config_register: the pdp position can not get parsed in %s - ignoring config\n", key+4);
+			if (kstrtou32(key + 4, 0, &offset)) {
+				printk(KERN_ERR " spi_config_register: the pdp position can not get parsed in %s - ignoring config\n", key + 4);
 				goto parse_device_config_error;
 			}
-			if(offset+sizeof(void*)>=result->pd_len) {
+			if (offset + sizeof(void*) >= result->pd_len) {
 				printk(KERN_ERR " spi_config_register: the pdp position %02x is larger than the length of the structure (%02x) - ignoring config\n", offset, result->pd_len);
 				goto parse_device_config_error;
 			}
@@ -286,7 +288,7 @@ static struct device_config* parse_device_config(char *devdesc)
 				goto parse_device_config_error;
 			}
 			/* maybe we also should check that there is at least sizeof(void*) bytes left to point to...*/
-			*((char**)(result->brd->platform_data+offset))=(char*)(result->brd->platform_data) + v;
+			*((char**)(result->brd->platform_data + offset))=(char*)(result->brd->platform_data) + v;
 		} 
 		else HANDLE_SIMPLE_DATA(s64, "pds64-", kstrtos64)
 		else HANDLE_SIMPLE_DATA(u64, "pdu64-", kstrtou64)
@@ -320,8 +322,7 @@ static void register_device(char *devdesc) {
 	printk(KERN_INFO "spi_config_register: device description: %s\n", devdesc);
 
 	config = parse_device_config(devdesc);
-	if (!config)
-	{
+	if (!config) {
 		goto register_device_err;
 	}
 
@@ -397,14 +398,15 @@ static void register_device(char *devdesc) {
 		goto register_device_err;
 	}
 
-	if (config->irq_gpio >= 0 || config->irq_source >= 0) {
+	if (config->irq_gpioname[0] || config->irq_source >= 0) {
+		int gpio;
 		if (config->brd->irq >= 0) {
 			printk(KERN_ERR " spi_config_register:spi%i.%i:%s: irq is set so irq_source and irq_gpio must be unset - ignoring config\n",
 				config->brd->bus_num, config->brd->chip_select, config->brd->modalias);
 			goto register_device_err;
 		}
 		
-		if (config->irq_gpio < 0) {
+		if (config->irq_gpioname[0] == '\0') {
 			printk(KERN_ERR " spi_config_register:spi%i.%i:%s: irq_source is set but irq_gpio is unset - ignoring config\n",
 				config->brd->bus_num, config->brd->chip_select, config->brd->modalias);
 			goto register_device_err;
@@ -416,17 +418,24 @@ static void register_device(char *devdesc) {
 			goto register_device_err;
 		}
 		
-		if (amlogic_gpio_request_one(config->irq_gpio, GPIOF_IN, config->brd->modalias)) {
+		config->brd->irq = INT_GPIO_0 + config->irq_source;
+		
+		gpio = amlogic_gpio_name_map_num(config->irq_gpioname);
+		if (gpio < 0) {
+			printk(KERN_ERR " spi_config_register:spi%i.%i:%s: irq_gpio is invalid - ignoring config\n",
+				config->brd->bus_num, config->brd->chip_select, config->brd->modalias);
+			goto register_device_err;
+		}
+
+		if (amlogic_gpio_request_one(gpio, GPIOF_IN, config->brd->modalias)) {
 			printk(KERN_ERR " spi_config_register:spi%i.%i:%s: amlogic_gpio_request_one fail - ignoring config\n",
 				config->brd->bus_num, config->brd->chip_select, config->brd->modalias);
 			goto register_device_err;
 		}
-		
-                // trigger = GPIO_IRQ_HIGH = 0, GPIO_IRQ_LOW = 1, GPIO_IRQ_RISING = 2, GPIO_IRQ_FALLING = 3
-		config->brd->irq = INT_GPIO_0 + config->irq_source;
-		if (amlogic_gpio_to_irq(config->irq_gpio, config->brd->modalias, AML_GPIO_IRQ(config->irq_source, FILTER_NUM1, 1))) {
-			printk(KERN_ERR " spi_config_register:spi%i.%i:%s: amlogic_gpio_to_irq fail - ignoring config\n",
-				config->brd->bus_num, config->brd->chip_select, config->brd->modalias);
+
+		if (amlogic_gpio_to_irq(gpio, config->brd->modalias, AML_GPIO_IRQ(config->irq_source, FILTER_NUM7, GPIO_IRQ_FALLING))) {
+			printk(KERN_ERR " spi_config_register:spi%i.%i:%s: amlogic_gpio_to_irq(%i,,%i) fail - ignoring config\n",
+				config->brd->bus_num, config->brd->chip_select, config->brd->modalias, gpio, config->irq_source);
 			goto register_device_err;
 		}
 	}
@@ -437,7 +446,7 @@ static void register_device(char *devdesc) {
 		spi_devices_cs[i]=spi_devices[spi_devices_count]->chip_select;
 
 		/* now report the settings */
-		if (spi_devices[spi_devices_count]->irq<0) {
+		if (spi_devices[spi_devices_count]->irq < 0) {
 			printk(KERN_INFO "spi_config_register:spi%i.%i: registering modalias=%s with max_speed_hz=%i mode=%i and no interrupt\n",
 				spi_devices[spi_devices_count]->master->bus_num,
 				spi_devices[spi_devices_count]->chip_select,
@@ -446,13 +455,13 @@ static void register_device(char *devdesc) {
 				spi_devices[spi_devices_count]->mode
 				);
 		} else {
-			printk(KERN_INFO "spi_config_register:spi%i.%i: registering modalias=%s with max_speed_hz=%i mode=%i and gpio/irq=%i/%i\n",
+			printk(KERN_INFO "spi_config_register:spi%i.%i: registering modalias=%s with max_speed_hz=%i mode=%i and gpio/irq=%s/%i\n",
 				spi_devices[spi_devices_count]->master->bus_num,
 				spi_devices[spi_devices_count]->chip_select,
 				spi_devices[spi_devices_count]->modalias,
 				spi_devices[spi_devices_count]->max_speed_hz,
 				spi_devices[spi_devices_count]->mode,
-				config->irq_gpio,
+				config->irq_gpioname,
 				spi_devices[spi_devices_count]->irq
 				);
 		}
@@ -474,12 +483,13 @@ static void register_device(char *devdesc) {
 	}
 
 	kfree(config);
+	
 	/* and return successfull */
 	return;
 	
 	/* error handling code */
 register_device_err:
-	if (config->brd->platform_data) { kfree(config->brd->platform_data); }
+	if (config->brd->platform_data) kfree(config->brd->platform_data);
 	kfree(config->brd);
 	kfree(config);
 	return;
