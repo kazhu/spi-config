@@ -6,8 +6,7 @@ spi board configuration without having to recompile the kernel, modified for ODR
 Compiling
 ---------
 ```
-make
-make install
+make KDIR=${KERNELSRC} install
 ```
 
 Usage:
@@ -26,7 +25,9 @@ possible keys are:
 * cs = the chip select (required)
 * mode = the SPI mode (optional, default mode 0)
 * irqgpio = the GPIO pin of the irq (optional, default none)
-* irqsource = the irq source (0-7) for the irq (optional, default none)
+* irqsource = the irq source (0-7) (optional, default none)
+* irqfilter = the irq filter. 0 = no filtering, 1..7 mean 111ns * 3 * x of filtering (optional, default 7)
+* irqtype = the irq type. 0: High, 1: Low, 2: Rising, 3: Falling (optional, default 3)
 * pd = platform data length to allocate
 * pdx-<offset> = sets the hex values at byte-offset <offset> of the platform data (hex string - 2 chars per byte!!!)
 * pdp-<offset> = sets a pointer to platform_data+<value> at byte-offset <offset> of the platform data 
@@ -47,8 +48,8 @@ So the following:
 
 ```
 modprobe spi-config devices=\
-bus=0:cs=0:modalias=mcp2515:speed=10000000:irqgpio=103:irqsource=0:pd=20:pdu32-0=16000000:pdu32-4=0x0008
+bus=0:cs=0:modalias=mcp2515:speed=10000000:irqgpio=GPIOX_6:irqsource=0:irqfilter=0:irqtype=1:pd=20:pdu32-0=16000000:pdu32-4=0x20
 ```
 
 will configure:
-* on SPI0.0 a mcp251x device with max_speed of 10MHz with IRQ on GPIOX_6 with IRQ_SOURCE_0 and platform data that reflects: 16MHz crystal and Interrupt flags with IRQF_TRIGGER_LOW
+* on SPI0.0 a mcp251x device with max_speed of 10MHz with IRQ on GPIOX_6 with irq=96, no filter and interrupt on LOW and platform data that reflects: 16MHz crystal and Interrupt flags with IRQF_DISABLED

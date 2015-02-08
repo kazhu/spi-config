@@ -493,7 +493,7 @@ static void register_device(char *devdesc) {
 				);
 			print_hex_dump(KERN_INFO,prefix,DUMP_PREFIX_ADDRESS,
 				16,1,
-				spi_devices[spi_devices_count]->dev.platform_data,config->pd_len,true
+				spi_devices[spi_devices_count]->dev.platform_data, config->pd_len, true
 				);
 		}
 		
