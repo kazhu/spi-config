@@ -48,6 +48,8 @@ struct device_config {
       int			force_release;
       char			irq_gpioname[20];
       int			irq_source;
+      int			irq_filter;
+      int			irq_type;
 };
 
 /* the devices that we have registered */
@@ -141,6 +143,8 @@ static struct device_config* parse_device_config(char *devdesc)
 	
 	memset(result, 0, sizeof(struct device_config));
 	result->irq_source = -1;
+	result->irq_filter = FILTER_NUM7;
+	result->irq_type = GPIO_IRQ_FALLING;
 	
 	result->brd = kmalloc(sizeof(struct spi_board_info), GFP_KERNEL);
 	if (!result->brd)
@@ -209,6 +213,8 @@ static struct device_config* parse_device_config(char *devdesc)
 			strncpy(result->irq_gpioname, value, sizeof(result->irq_gpioname));
 		} 
 		else HANDLE_DATA("irqsource", kstrtoint, result->irq_source)
+		else HANDLE_DATA("irqfilter", kstrtoint, result->irq_filter)
+		else HANDLE_DATA("irqtype", kstrtoint, result->irq_type)
 		else if (strcmp(key, "pd") == 0) {
 			/* we may only allocate once */
 			if (result->pd_len) {
@@ -418,6 +424,19 @@ static void register_device(char *devdesc) {
 			goto register_device_err;
 		}
 		
+		if ((config->irq_filter < FILTER_NUM0) || (config->irq_filter > FILTER_NUM7)) {
+			printk(KERN_ERR " spi_config_register:spi%i.%i:%s: irqfilter is invalid - ignoring config\n",
+				config->brd->bus_num, config->brd->chip_select, config->brd->modalias);
+			goto register_device_err;
+		}
+
+		if ((config->irq_type != GPIO_IRQ_HIGH) && (config->irq_type != GPIO_IRQ_LOW) 
+			&& (config->irq_type != GPIO_IRQ_RISING) && (config->irq_type != GPIO_IRQ_FALLING)) {
+			printk(KERN_ERR " spi_config_register:spi%i.%i:%s: irqfilter is invalid - ignoring config\n",
+				config->brd->bus_num, config->brd->chip_select, config->brd->modalias);
+			goto register_device_err;
+		}
+		
 		config->brd->irq = INT_GPIO_0 + config->irq_source;
 		
 		gpio = amlogic_gpio_name_map_num(config->irq_gpioname);
@@ -433,7 +452,7 @@ static void register_device(char *devdesc) {
 			goto register_device_err;
 		}
 
-		if (amlogic_gpio_to_irq(gpio, config->brd->modalias, AML_GPIO_IRQ(config->irq_source, FILTER_NUM7, GPIO_IRQ_FALLING))) {
+		if (amlogic_gpio_to_irq(gpio, config->brd->modalias, AML_GPIO_IRQ(config->irq_source, config->irq_filter, config->irq_type))) {
 			printk(KERN_ERR " spi_config_register:spi%i.%i:%s: amlogic_gpio_to_irq(%i,,%i) fail - ignoring config\n",
 				config->brd->bus_num, config->brd->chip_select, config->brd->modalias, gpio, config->irq_source);
 			goto register_device_err;
@@ -465,6 +484,7 @@ static void register_device(char *devdesc) {
 				spi_devices[spi_devices_count]->irq
 				);
 		}
+		
 		if (spi_devices[spi_devices_count]->dev.platform_data) {
 			char prefix[64];
 			snprintf(prefix,sizeof(prefix),"spi_config_register:spi%i.%i:platform data:",
@@ -476,9 +496,10 @@ static void register_device(char *devdesc) {
 				spi_devices[spi_devices_count]->dev.platform_data,config->pd_len,true
 				);
 		}
+		
 		spi_devices_count++;
 	} else {
-		printk(KERN_ERR "spi_config_register:spi%i.%i:%s: failed to register device\n", config->brd->bus_num,config->brd->chip_select,config->brd->modalias);
+		printk(KERN_ERR "spi_config_register:spi%i.%i:%s: failed to register device\n", config->brd->bus_num, config->brd->chip_select, config->brd->modalias);
 		goto register_device_err;
 	}
 
